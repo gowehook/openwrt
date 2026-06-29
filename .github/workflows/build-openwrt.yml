@@ -1,4 +1,3 @@
-cat << 'EOF' > .github/workflows/build.yml
 name: Build OpenWrt for Lite-On WP8722-BT
 
 on:
@@ -61,4 +60,3 @@ jobs:
         files: ${{ env.FIRMWARE_PATH }}/*
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-EOF
