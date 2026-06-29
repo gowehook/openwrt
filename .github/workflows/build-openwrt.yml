@@ -2,9 +2,9 @@ name: Build OpenWrt – Lite-On WP8722-BT
 
 on:
   # Trigger otomatis saat .config atau workflow ini berubah
-  #push:
-  #  branches:
-  #    - liteon_wp8722-bt
+  push:
+    branches:
+      - liteon_wp8722-bt
   #  paths:
   #    - '.config'
   #    - '.github/workflows/build-openwrt.yml'
