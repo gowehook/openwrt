@@ -1,6 +1,10 @@
 name: Build OpenWrt for Lite-On WP8722-BT
 
 on:
+  push:
+    branches:
+      - liteon_wp8722-bt
+
   workflow_dispatch:
 
 jobs:
