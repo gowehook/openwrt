@@ -1,64 +1,249 @@
-cat << 'EOF' > .github/workflows/build.yml
 name: Build OpenWrt for Lite-On WP8722-BT
 
 on:
   workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  REPO_ROOT: ${{ github.workspace }}
 
 jobs:
   build:
     runs-on: ubuntu-22.04
 
     steps:
+    - name: Free Up Disk Space
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        echo "============================================"
+        echo " Disk space BEFORE cleanup"
+        echo "============================================"
+        df -h
+
+        sudo rm -rf \
+          /usr/share/dotnet \
+          /usr/local/lib/android \
+          /opt/ghc \
+          /opt/hostedtoolcache/CodeQL \
+          /usr/local/share/powershell \
+          /usr/share/swift \
+          /usr/lib/jvm \
+          /usr/local/.ghcup
+
+        sudo apt-get purge -y \
+          azure-cli ghc zulu* llvm* firefox \
+          google-chrome-stable dotnet* powershell \
+          openjdk* mongodb* moby* snapd || true
+
+        sudo apt-get autoremove -y
+        sudo apt-get clean
+        docker rmi $(docker images -q) 2>/dev/null || true
+
+        echo "============================================"
+        echo " Disk space AFTER cleanup"
+        echo "============================================"
+        df -h
+
     - name: Checkout Repository
       uses: actions/checkout@v4
       with:
         fetch-depth: 0
 
-    - name: Initialization Environment
+    - name: Verify Working Directory
+      run: |
+        echo "GITHUB_WORKSPACE : $GITHUB_WORKSPACE"
+        echo "REPO_ROOT (env)  : $REPO_ROOT"
+        echo "Current directory: $PWD"
+
+        if [ -z "$GITHUB_WORKSPACE" ]; then
+          echo "ERROR: GITHUB_WORKSPACE is not set. Aborting."
+          exit 1
+        fi
+
+        if [ ! -d "$REPO_ROOT" ]; then
+          echo "ERROR: REPO_ROOT does not exist: $REPO_ROOT"
+          exit 1
+        fi
+
+        echo "Working directory verified. Safe to proceed."
+
+    - name: Install Build Dependencies
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
-        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell /usr/share/swift /alloc /filesystem
         sudo -E apt-get -qq update
-        sudo -E apt-get -qq install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp nano p7zip p7zip-full patch pkgconf python3 python3-pip python3-ply python3-docutils qemu-utils rsync scons squashfs-tools subversion swig texinfo u-boot-tools upx-ucl unzip vim wget xmlto xz-utils zlib1g-dev
+        sudo -E apt-get -qq install -y \
+          ack antlr3 asciidoc autoconf automake autopoint binutils bison \
+          build-essential bzip2 ccache cmake cpio curl device-tree-compiler \
+          fastjar flex gawk gettext gcc-multilib g++-multilib git gperf \
+          haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev \
+          libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev \
+          libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz mkisofs \
+          msmtp nano p7zip p7zip-full patch pkgconf python3 python3-pip \
+          python3-ply python3-docutils qemu-utils rsync scons squashfs-tools \
+          subversion swig texinfo u-boot-tools upx-ucl unzip vim wget xmlto \
+          xz-utils zlib1g-dev
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
 
     - name: Update and Install Feeds
+      working-directory: ${{ env.REPO_ROOT }}
       run: |
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
     - name: Load Custom Configuration
+      working-directory: ${{ env.REPO_ROOT }}
       run: |
-        [ -f seed.config ] && cp -f seed.config .config
+        if [ -f "$REPO_ROOT/seed.config" ]; then
+          echo "Custom seed.config found, applying..."
+          cp -f "$REPO_ROOT/seed.config" "$REPO_ROOT/.config"
+        else
+          echo "No seed.config found, using default config."
+        fi
         make defconfig
 
-    - name: Download Package Source Code
+    - name: Download Package Sources
+      working-directory: ${{ env.REPO_ROOT }}
       run: |
         make download -j8
-        find package -name "download" -o -name "git-src" | xargs rm -rf
+        find "$REPO_ROOT/dl" -type f -size -1024c -exec rm -v {} \;
+
+        echo "============================================"
+        echo " Disk space after download"
+        echo "============================================"
+        df -h
 
     - name: Compile Firmware
+      working-directory: ${{ env.REPO_ROOT }}
       run: |
-        echo "Building firmware..."
-        make -j$(nproc) || make -j1 V=s
-        echo "status=success" >> $GITHUB_ENV
+        echo "============================================"
+        echo " Starting firmware compilation"
+        echo " Parallel jobs: $(nproc)"
+        echo "============================================"
 
-    - name: Organize Compiled Files
-      if: env.status == 'success'
+        if make -j$(nproc); then
+          echo "Parallel build succeeded."
+          echo "BUILD_STATUS=success" >> $GITHUB_ENV
+        elif make -j1 V=s; then
+          echo "Single-threaded build succeeded."
+          echo "BUILD_STATUS=success" >> $GITHUB_ENV
+        else
+          echo "ERROR: Build failed on both attempts."
+          echo "BUILD_STATUS=failure" >> $GITHUB_ENV
+          exit 1
+        fi
+
+        echo "============================================"
+        echo " Disk space after compilation"
+        echo "============================================"
+        df -h
+
+    - name: Locate Firmware Output
+      if: env.BUILD_STATUS == 'success'
       run: |
-        cd bin/targets/*/*
-        rm -rf packages
-        echo "FIRMWARE_PATH=$PWD" >> $GITHUB_ENV
+        FIRMWARE_DIR=$(find "$GITHUB_WORKSPACE/bin/targets" \
+          -mindepth 2 -maxdepth 2 -type d | head -n 1)
 
-    - name: Upload Firmware to GitHub Releases
-      if: env.status == 'success'
+        if [ -z "$FIRMWARE_DIR" ]; then
+          echo "ERROR: Firmware output directory not found."
+          exit 1
+        fi
+
+        echo "Firmware directory: $FIRMWARE_DIR"
+        echo "FIRMWARE_PATH=$FIRMWARE_DIR" >> $GITHUB_ENV
+
+    - name: Compress Packages by Category
+      if: env.BUILD_STATUS == 'success'
+      run: |
+        # Staging directory for all release assets (compressed archives)
+        COMPRESS_DIR="$GITHUB_WORKSPACE/release-assets"
+        mkdir -p "$COMPRESS_DIR"
+
+        # -------------------------------------------------------
+        # 1. Kernel Modules (kmod)
+        #    Source: bin/targets/<arch>/<subtarget>/packages/
+        # -------------------------------------------------------
+        KMOD_SRC="$FIRMWARE_PATH/packages"
+        if [ -d "$KMOD_SRC" ]; then
+          echo "Compressing kmod packages..."
+          tar -czf "$COMPRESS_DIR/kmod-packages.tar.gz" \
+            -C "$FIRMWARE_PATH" packages
+          echo "  -> kmod-packages.tar.gz ($(du -sh "$COMPRESS_DIR/kmod-packages.tar.gz" | cut -f1))"
+        else
+          echo "No kmod packages directory found, skipping."
+        fi
+
+        # -------------------------------------------------------
+        # 2. Packages per category
+        #    Source: bin/packages/<arch>/<category>/
+        #    Categories typically: base, luci, packages, routing, telephony
+        # -------------------------------------------------------
+        PKG_BASE="$GITHUB_WORKSPACE/bin/packages"
+        if [ -d "$PKG_BASE" ]; then
+          for arch_dir in "$PKG_BASE"/*/; do
+            [ -d "$arch_dir" ] || continue
+            for cat_dir in "$arch_dir"*/; do
+              [ -d "$cat_dir" ] || continue
+              CAT_NAME=$(basename "$cat_dir")
+              ARCHIVE="$COMPRESS_DIR/${CAT_NAME}-packages.tar.gz"
+              echo "Compressing category: $CAT_NAME..."
+              tar -czf "$ARCHIVE" -C "$arch_dir" "$CAT_NAME"
+              echo "  -> ${CAT_NAME}-packages.tar.gz ($(du -sh "$ARCHIVE" | cut -f1))"
+            done
+          done
+        else
+          echo "No packages directory found at $PKG_BASE, skipping."
+        fi
+
+        echo "COMPRESS_DIR=$COMPRESS_DIR" >> $GITHUB_ENV
+
+        echo "============================================"
+        echo " All compressed release assets:"
+        ls -lh "$COMPRESS_DIR"
+        echo "============================================"
+
+    - name: Upload to GitHub Releases
+      if: env.BUILD_STATUS == 'success'
       uses: softprops/action-gh-release@v2
       with:
         tag_name: openwrt-wp8722-bt-${{ github.run_id }}
-        name: OpenWrt Firmware for Lite-On WP8722-BT
-        files: ${{ env.FIRMWARE_PATH }}/*
+        name: "OpenWrt Firmware for Lite-On WP8722-BT"
+        body: |
+          ## OpenWrt Build — Lite-On WP8722-BT
+
+          | Field      | Value |
+          |------------|-------|
+          | Build ID   | ${{ github.run_id }} |
+          | Branch     | ${{ github.ref_name }} |
+          | Commit SHA | ${{ github.sha }} |
+          | Runner OS  | ubuntu-22.04 |
+
+          ## Release Assets
+
+          | File | Description |
+          |------|-------------|
+          | `openwrt-*.bin / *.img.gz` | Firmware image for flashing |
+          | `kmod-packages.tar.gz` | Kernel modules (kmod) |
+          | `base-packages.tar.gz` | Base system packages |
+          | `luci-packages.tar.gz` | LuCI web interface packages |
+          | `packages-packages.tar.gz` | Extra/community packages |
+          | `routing-packages.tar.gz` | Routing protocol packages |
+          | `telephony-packages.tar.gz` | Telephony packages |
+
+          > Install packages manually: extract `.tar.gz`, copy `.apk` to router,then `apk install *.apk`
+        draft: false
+        prerelease: false
+        files: |
+          ${{ env.FIRMWARE_PATH }}/*.bin
+          ${{ env.FIRMWARE_PATH }}/*.img.gz
+          ${{ env.FIRMWARE_PATH }}/*.ubi
+          ${{ env.FIRMWARE_PATH }}/sha256sums
+          ${{ env.FIRMWARE_PATH }}/config.buildinfo
+          ${{ env.FIRMWARE_PATH }}/feeds.buildinfo
+          ${{ env.COMPRESS_DIR }}/*.tar.gz
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-EOF
